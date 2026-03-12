@@ -1,8 +1,4 @@
 #!/bin/bash
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-#   AskMovies Public Poster Bot — One Click Deploy
-#   Usage: bash deploy.sh
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 set -e
 
 REPO_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -16,26 +12,23 @@ echo "  AskMovies Public Poster Bot — Deploy"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 echo ""
 
-echo "📦 Step 1 — Installing system packages..."
+echo "📦 Installing system packages..."
 apt update -qq
 apt install -y python3 python3-pip python3-venv git
 echo "✅ Done"
-echo ""
 
-echo "🐍 Step 2 — Setting up virtual environment..."
+echo "🐍 Setting up virtual environment..."
 cd "$BOT_DIR"
 python3 -m venv venv
 source venv/bin/activate
 pip install -q --upgrade pip
 pip install -q -r requirements.txt
 echo "✅ Done"
-echo ""
 
-echo "🔍 Step 3 — Syntax check..."
+echo "🔍 Syntax check..."
 python3 -c "import ast; ast.parse(open('poster_bot.py').read()); print('✅ poster_bot.py OK')"
-echo ""
 
-echo "⚙️  Step 4 — Installing systemd service..."
+echo "⚙️ Creating systemd service..."
 cat > "$SERVICE_FILE" << SVCEOF
 [Unit]
 Description=AskMovies Public Poster Bot
@@ -62,21 +55,21 @@ SVCEOF
 
 systemctl daemon-reload
 systemctl enable "$SERVICE_NAME"
-echo "✅ Done"
-echo ""
+echo "✅ Service installed"
 
+echo ""
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 echo "✅ Setup complete!"
 echo ""
-echo "👉 NEXT — Add your credentials:"
+echo "👉 Add your credentials:"
 echo "   nano $SERVICE_FILE"
 echo ""
-echo "   BOT_TOKEN    = token from @BotFather"
-echo "   ADMIN_IDS    = your Telegram user ID (@userinfobot)"
-echo "   TMDB_API_KEY = themoviedb.org/settings/api"
-echo "   MONGO_URL    = MongoDB Atlas connection string"
+echo "   BOT_TOKEN    → from @BotFather"
+echo "   ADMIN_IDS    → your Telegram ID (@userinfobot)"
+echo "   TMDB_API_KEY → themoviedb.org/settings/api"
+echo "   MONGO_URL    → MongoDB Atlas connection string"
 echo ""
-echo "👉 THEN START:"
+echo "👉 Then start the bot:"
 echo "   systemctl daemon-reload"
 echo "   systemctl start $SERVICE_NAME"
 echo "   systemctl status $SERVICE_NAME"
