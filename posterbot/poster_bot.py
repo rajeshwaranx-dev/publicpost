@@ -42,9 +42,9 @@ from telegram.ext import (
 from telegram.constants import ParseMode
 
 # ── Config ────────────────────────────────────────────────────
-BOT_TOKEN     = os.environ["BOT_TOKEN"]
-TMDB_API_KEY  = os.environ.get("TMDB_API_KEY", "")
-MONGO_URL     = os.environ.get("MONGO_URL", "")
+BOT_TOKEN     = os.environ.get("BOT_TOKEN", "8647213611:AAH1Q6hmWVwnzzwPVJkfZMUOux2773_x1gs")
+TMDB_API_KEY  = os.environ.get("TMDB_API_KEY", "992a90609f7400986165a20903ab9006")
+MONGO_URL     = os.environ.get("MONGO_URL", "mongodb+srv://bharath:bharathx@cluster0.7zcyu4q.mongodb.net/?appName=Cluster0")
 MONGO_DB_NAME = os.environ.get("MONGO_DB_NAME", "askfiles_public")
 ADMIN_IDS: set[int] = {
     int(x.strip()) for x in os.environ.get("ADMIN_IDS", "").split(",")
