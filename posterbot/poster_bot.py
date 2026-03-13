@@ -544,10 +544,23 @@ async def build_caption(data: dict, user: dict) -> str:
     file_lines = "\n" + sep.join(file_parts) if file_parts else ""
 
     def make_trinity_batch(file_list: list) -> str:
-        """Build Trinity filestore batch link — base64(id1-id2-id3)"""
-        ids     = [file_id_from_url(f["link"]) for f in file_list]
-        joined  = "-".join(ids)
-        encoded = base64.urlsafe_b64encode(joined.encode()).decode().rstrip("=")
+        """Build Trinity batch link — base64('get-msgid1-msgid2-...')"""
+        msg_ids = []
+        for f in file_list:
+            fid = file_id_from_url(f["link"])
+            # fid is like fs_MTgzMzg= → decode to get message ID
+            if fid.startswith("fs_"):
+                try:
+                    b64 = fid[3:]  # strip fs_ prefix
+                    msg_id = base64.urlsafe_b64decode(b64 + "==").decode()
+                    msg_ids.append(msg_id)
+                except Exception:
+                    msg_ids.append(fid)
+            else:
+                msg_ids.append(fid)
+
+        batch_str = "get-" + "-".join(msg_ids)
+        encoded   = base64.urlsafe_b64encode(batch_str.encode()).decode().rstrip("=")
         if worker_url:
             return f"{worker_url}/?start={encoded}"
         return f"https://t.me/{filestore_bot}?start={encoded}"
