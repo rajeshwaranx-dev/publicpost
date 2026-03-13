@@ -105,6 +105,7 @@ SOURCE_RE  = re.compile(
 EP_RE      = re.compile(r"\bS\d{1,2}E(\d{1,3})\b|\bEP?\s*(\d{1,3})\b", re.IGNORECASE)
 
 # ── Default caption ───────────────────────────────────────────
+DEFAULT_NOTE    = "<b>Note 💢: If link not working, copy and paste in browser.</b>"
 DEFAULT_CAPTION = (
     "{header}\n"
     "🎬 <b>Title: {title}</b>\n"
@@ -115,7 +116,7 @@ DEFAULT_CAPTION = (
     "\n<b>🔺Telegram File🔻</b>\n"
     "{files}\n\n"
     "{batch}\n\n"
-    "<b>Note 💢: If link not working, copy and paste in browser.</b>\n\n"
+    "{note}\n\n"
     "{join}"
 )
 
@@ -528,7 +529,11 @@ async def build_caption(data: dict, user: dict) -> str:
                 fid = file_id_from_url(f["link"])
                 lnk = f"{worker_url}/?start={fid}" if worker_url else f["link"]
                 q   = f.get("quality") or quality_label or "HD"
-                q_links.append(f'<a href="{lnk}"><b>{q}</b></a>')
+                # Apply custom quality emoji if set
+                q_emojis = user.get("quality_emojis", {})
+                emoji    = q_emojis.get(q, "")
+                label    = f"{emoji}{q}" if emoji else q
+                q_links.append(f'<a href="{lnk}"><b>{label}</b></a>')
             ep_label = f"EP{ep:02d}" if ep else "EP"
             qualities = " | ".join(q_links)
             file_parts.append(f'🌊 <b>{ep_label} :</b> {qualities}')
@@ -631,9 +636,13 @@ async def build_caption(data: dict, user: dict) -> str:
         if sm:
             season_line = f"\n💫 <b>Season: {int(sm.group(1))}</b>"
 
-    # Rating
-    tmdb_rating = data.get("tmdb_rating")
-    rating_line = f"⭐ <b>Rating: {tmdb_rating}</b>\n" if tmdb_rating else ""
+    # Rating — per-user toggle
+    tmdb_rating        = data.get("tmdb_rating")
+    user_rating_on     = user.get("rating_enabled", True)
+    rating_line        = f"⭐ <b>Rating: {tmdb_rating}</b>\n" if (tmdb_rating and user_rating_on) else ""
+
+    # Note line — custom or default
+    note_line = user.get("note_text") or DEFAULT_NOTE
 
     # Build join line — custom or default
     join_raw  = user.get("join_text") or DEFAULT_JOIN
@@ -656,25 +665,39 @@ async def build_caption(data: dict, user: dict) -> str:
         "filestore_bot": filestore_bot,
         "join":          join_line,
         "header":        header_line,
+        "note":          note_line,
     })
 
 
 # ═══════════════════════════════════════════════════════════
 # SEND HELPERS
 # ═══════════════════════════════════════════════════════════
-async def send_post(bot, channel: str, poster: str | None, caption: str) -> Message | None:
-    if poster and poster_enabled:
+async def send_post(bot, channel: str, poster: str | None, caption: str, user: dict | None = None) -> Message | None:
+    user_poster_on = (user.get("poster_enabled", True) if user else True) and poster_enabled
+    if poster and user_poster_on:
         try:
-            return await bot.send_photo(
+            msg = await bot.send_photo(
                 chat_id=channel, photo=poster,
                 caption=caption, parse_mode=ParseMode.HTML,
             )
         except Exception as exc:
             log.warning("Photo send failed in %s: %s", channel, exc)
-    return await bot.send_message(
-        chat_id=channel, text=caption,
-        parse_mode=ParseMode.HTML, disable_web_page_preview=True,
-    )
+            msg = await bot.send_message(
+                chat_id=channel, text=caption,
+                parse_mode=ParseMode.HTML, disable_web_page_preview=True,
+            )
+    else:
+        msg = await bot.send_message(
+            chat_id=channel, text=caption,
+            parse_mode=ParseMode.HTML, disable_web_page_preview=True,
+        )
+    # Auto-pin if enabled for user
+    if msg and user and user.get("pin_posts"):
+        try:
+            await bot.pin_chat_message(chat_id=channel, message_id=msg.message_id, disable_notification=True)
+        except Exception as e:
+            log.warning("Pin failed in %s: %s", channel, e)
+    return msg
 
 
 # ═══════════════════════════════════════════════════════════
@@ -813,15 +836,19 @@ async def handle_edited_post(update: Update, context: ContextTypes.DEFAULT_TYPE)
     languages = meta.get("languages", [])
     user_name = user["_id"]
 
+    # Per-user poster/rating toggles (fallback to global)
+    user_poster_on = user.get("poster_enabled", poster_enabled)
+    user_rating_on = user.get("rating_enabled", rating_enabled)
+
     # Single non-blocking TMDB call
-    if poster_enabled or rating_enabled:
+    if user_poster_on or user_rating_on:
         tmdb_poster, tmdb_rating = await fetch_tmdb(title, year, languages)
     else:
         tmdb_poster, tmdb_rating = None, None
 
-    if not rating_enabled:
+    if not user_rating_on:
         tmdb_rating = None
-    if not poster_enabled:
+    if not user_poster_on:
         tmdb_poster = None
 
     public_channels = user.get("public_channels", [])
@@ -881,9 +908,9 @@ async def handle_edited_post(update: Update, context: ContextTypes.DEFAULT_TYPE)
                 }
                 caption = await build_caption(data, user)
                 try:
-                    sent = await send_post(context.bot, target_channel, tmdb_poster, caption)
+                    sent = await send_post(context.bot, target_channel, tmdb_poster, caption, user)
                     data["message_id"] = sent.message_id
-                    data["has_photo"]  = bool(tmdb_poster and poster_enabled)
+                    data["has_photo"]  = bool(tmdb_poster and user.get("poster_enabled", poster_enabled))
                     user_posted[mkey]  = data
                     update_stats(user_name)
                     log.info("✅ Posted user=%s ch=%s title=%r", user_name, target_channel, title)
@@ -940,35 +967,56 @@ async def commands_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = (
         "📋 <b>All Commands</b>\n\n"
 
-        "<b>👥 User Management</b>\n"
+        "<b>👥 User Management (Admin)</b>\n"
         "/adduser name filestore_bot — Add new user\n"
-        "/removeuser name — Delete user completely\n"
-        "/listusers — Show all users and config\n"
-        "/userinfo name — Show single user details\n"
-        "/toggleuser name — Activate / deactivate user\n\n"
+        "/removeuser name — Delete user\n"
+        "/listusers — Show all users\n"
+        "/userinfo name — Show user details\n"
+        "/toggleuser name — Activate/deactivate user\n"
+        "/copyuser source new — Copy all settings to new user\n"
+        "/linkuser name TELEGRAM_ID — Link Telegram ID to user\n\n"
 
-        "<b>⚙️ User Config</b>\n"
-        "/setlog name -100xxx — Add log channel (max 2)\n"
+        "<b>⚙️ User Config (Admin)</b>\n"
+        "/setlog name -100xxx — Add log channel\n"
         "/removelog name -100xxx — Remove log channel\n"
-        "/setchannel name -100xxx — Add public channel (max 2)\n"
+        "/setchannel name -100xxx — Add public channel\n"
         "/removechannel name -100xxx — Remove public channel\n"
         "/setfilestore name BotUsername — Set filestore bot\n"
         "/setworker name https://... — Set worker URL\n"
-        "/settmdb name apikey — Set per-user TMDB key override\n"
+        "/settrinitydb name mongo_url db — Set Trinity MongoDB\n"
+        "/setbatchmode name batchkey|range — Set batch mode\n"
+        "/setdbchannel name -100xxx — Set DB channel (range mode)\n"
+        "/setheader name Text | URL — Set header\n"
+        "/removeheader name — Remove header\n"
+        "/setjoin name text — Set join line\n"
+        "/removejoin name — Remove join line\n"
         "/setcaption name template — Set custom caption\n"
-        "/resetcaption name — Reset caption to default\n\n"
+        "/resetcaption name — Reset caption to default\n"
+        "/setnote name text — Set custom note line\n"
+        "/removenote name — Reset note to default\n"
+        "/pin name on|off — Auto-pin new posts\n"
+        "/setposter name on|off — Toggle TMDB poster per user\n"
+        "/setrating name on|off — Toggle TMDB rating per user\n"
+        "/setqualityemoji name 1080p 🔥 — Custom quality emoji\n\n"
 
-        "<b>🎛 Bot Control</b>\n"
-        "/poster on|off — Toggle TMDB poster globally\n"
-        "/rating on|off — Toggle TMDB rating globally\n"
+        "<b>🎛 Bot Control (Admin)</b>\n"
+        "/poster on|off — Toggle poster globally\n"
+        "/rating on|off — Toggle rating globally\n"
         "/pause — Pause all posting\n"
         "/resume — Resume posting\n\n"
 
-        "<b>📊 Stats & Monitoring</b>\n"
-        "/stats — Global posting statistics\n"
+        "<b>📊 Stats & Monitoring (Admin)</b>\n"
+        "/stats — Global stats\n"
         "/failed — List failed posts\n"
         "/retry — Retry all failed posts\n"
-        "/notify — Test admin DM\n"
+        "/notify — Test admin DM\n\n"
+
+        "<b>👤 User Commands (linked users only)</b>\n"
+        "/myinfo — View your account info\n"
+        "/recentposts — Last 5 posts\n"
+        "/preview — Preview your caption\n"
+        "/repost title — Repost a corrupted/deleted post\n"
+        "📸 Send photo with caption <code>/setposter Movie Title</code> — Replace poster\n"
     )
     await update.message.reply_text(msg, parse_mode=ParseMode.HTML)
 
@@ -1529,39 +1577,6 @@ async def setheader_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 @admin_only
-async def getheader_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """
-    /getheader name
-    """
-    args = context.args
-    if not args:
-        await update.message.reply_text("Usage: /getheader name")
-        return
-
-    name = args[0].lower().strip()
-    user = await load_user(name)
-    if not user:
-        await update.message.reply_text(f"❌ User <b>{name}</b> not found.", parse_mode=ParseMode.HTML)
-        return
-
-    header_text = user.get("header_text")
-    if not header_text:
-        await update.message.reply_text(
-            f"<b>{name}</b> is using default header:\n\n"
-            f"<code>{DEFAULT_HEADER}</code>",
-            parse_mode=ParseMode.HTML,
-        )
-        return
-
-    await update.message.reply_text(
-        f"<b>{name}</b> custom header:\n\n"
-        f"<b>Raw:</b> <code>{header_text}</code>\n\n"
-        f"<b>Preview:</b>\n{header_text.format(filestore_bot=user.get('filestore_bot','?'))}",
-        parse_mode=ParseMode.HTML,
-    )
-
-
-@admin_only
 async def removeheader_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
     /removeheader name
@@ -1629,41 +1644,6 @@ async def setjoin_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 @admin_only
-async def getjoin_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """
-    /getjoin name
-    """
-    args = context.args
-    if not args:
-        await update.message.reply_text("Usage: /getjoin name")
-        return
-
-    name = args[0].lower().strip()
-    user = await load_user(name)
-    if not user:
-        await update.message.reply_text(f"❌ User <b>{name}</b> not found.", parse_mode=ParseMode.HTML)
-        return
-
-    header_text = user.get("header_text")
-    header_disp = "Custom ✅" if header_text else "Default (AskMovies)"
-    join_text = user.get("join_text")
-    if not join_text:
-        await update.message.reply_text(
-            f"<b>{name}</b> is using default join text:\n\n"
-            f"<code>{DEFAULT_JOIN}</code>",
-            parse_mode=ParseMode.HTML,
-        )
-        return
-
-    await update.message.reply_text(
-        f"<b>{name}</b> custom join text:\n\n"
-        f"<b>Raw (copy this):</b>\n<code>{join_text.replace(chr(10), chr(92)+'n')}</code>\n\n"
-        f"<b>Preview:</b>\n{join_text}",
-        parse_mode=ParseMode.HTML,
-    )
-
-
-@admin_only
 async def removejoin_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
     /removejoin name
@@ -1706,6 +1686,461 @@ async def resetcaption_command(update: Update, context: ContextTypes.DEFAULT_TYP
     await save_user(user)
     await update.message.reply_text(
         f"✅ Caption reset to default for <b>{name}</b>.", parse_mode=ParseMode.HTML
+    )
+
+
+# ═══════════════════════════════════════════════════════════
+# COMMANDS — NEW ADMIN COMMANDS
+# ═══════════════════════════════════════════════════════════
+
+@admin_only
+async def setnote_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    /setnote name Your note text here
+    Set custom note line per user. Use {filestore_bot} placeholder.
+    """
+    msg  = update.message
+    text = msg.text or ""
+    body = re.sub(r"^/setnote\s*", "", text, flags=re.IGNORECASE).strip()
+    parts = body.split(None, 1)
+    if len(parts) < 2:
+        await msg.reply_text(
+            "Usage: /setnote name Your note text\n\n"
+            "Example:\n/setnote rajesh ⚠️ If link fails, open in browser."
+        )
+        return
+    name = parts[0].lower().strip()
+    note = parts[1].strip()
+    user = await load_user(name)
+    if not user:
+        await msg.reply_text(f"❌ User <b>{name}</b> not found.", parse_mode=ParseMode.HTML)
+        return
+    user["note_text"] = note
+    await save_user(user)
+    await msg.reply_text(f"✅ Note set for <b>{name}</b>\n\n{note}", parse_mode=ParseMode.HTML)
+
+
+@admin_only
+async def removenote_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    /removenote name
+    """
+    args = context.args
+    if not args:
+        await update.message.reply_text("Usage: /removenote name")
+        return
+    name = args[0].lower().strip()
+    user = await load_user(name)
+    if not user:
+        await update.message.reply_text(f"❌ User <b>{name}</b> not found.", parse_mode=ParseMode.HTML)
+        return
+    user["note_text"] = None
+    await save_user(user)
+    await update.message.reply_text(f"✅ Note reset to default for <b>{name}</b>.", parse_mode=ParseMode.HTML)
+
+
+@admin_only
+async def pin_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    /pin name on|off
+    Auto-pin every new post in public channel.
+    """
+    args = context.args
+    if len(args) < 2:
+        await update.message.reply_text("Usage: /pin name on|off")
+        return
+    name  = args[0].lower().strip()
+    value = args[1].lower().strip()
+    if value not in ("on", "off"):
+        await update.message.reply_text("❌ Value must be <b>on</b> or <b>off</b>", parse_mode=ParseMode.HTML)
+        return
+    user = await load_user(name)
+    if not user:
+        await update.message.reply_text(f"❌ User <b>{name}</b> not found.", parse_mode=ParseMode.HTML)
+        return
+    user["pin_posts"] = (value == "on")
+    await save_user(user)
+    status = "🟢 ON" if value == "on" else "🔴 OFF"
+    await update.message.reply_text(f"✅ Auto-pin <b>{status}</b> for <b>{name}</b>.", parse_mode=ParseMode.HTML)
+
+
+@admin_only
+async def setposter_toggle_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    /setposter name on|off
+    Toggle TMDB poster per user.
+    """
+    args = context.args
+    if len(args) < 2:
+        await update.message.reply_text("Usage: /setposter name on|off")
+        return
+    name  = args[0].lower().strip()
+    value = args[1].lower().strip()
+    if value not in ("on", "off"):
+        await update.message.reply_text("❌ Value must be on or off")
+        return
+    user = await load_user(name)
+    if not user:
+        await update.message.reply_text(f"❌ User <b>{name}</b> not found.", parse_mode=ParseMode.HTML)
+        return
+    user["poster_enabled"] = (value == "on")
+    await save_user(user)
+    status = "🟢 ON" if value == "on" else "🔴 OFF"
+    await update.message.reply_text(f"✅ Poster <b>{status}</b> for <b>{name}</b>.", parse_mode=ParseMode.HTML)
+
+
+@admin_only
+async def setrating_toggle_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    /setrating name on|off
+    Toggle TMDB rating per user.
+    """
+    args = context.args
+    if len(args) < 2:
+        await update.message.reply_text("Usage: /setrating name on|off")
+        return
+    name  = args[0].lower().strip()
+    value = args[1].lower().strip()
+    if value not in ("on", "off"):
+        await update.message.reply_text("❌ Value must be on or off")
+        return
+    user = await load_user(name)
+    if not user:
+        await update.message.reply_text(f"❌ User <b>{name}</b> not found.", parse_mode=ParseMode.HTML)
+        return
+    user["rating_enabled"] = (value == "on")
+    await save_user(user)
+    status = "🟢 ON" if value == "on" else "🔴 OFF"
+    await update.message.reply_text(f"✅ Rating <b>{status}</b> for <b>{name}</b>.", parse_mode=ParseMode.HTML)
+
+
+@admin_only
+async def setqualityemoji_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    /setqualityemoji name 1080p 🔥
+    Set custom emoji prefix for a quality level.
+    """
+    args = context.args
+    if len(args) < 3:
+        await update.message.reply_text(
+            "Usage: /setqualityemoji name quality emoji\n\n"
+            "Examples:\n"
+            "/setqualityemoji rajesh 1080p 🔥\n"
+            "/setqualityemoji rajesh 480p ⚡\n"
+            "/setqualityemoji rajesh 720p 💎"
+        )
+        return
+    name    = args[0].lower().strip()
+    quality = args[1].strip()
+    emoji   = args[2].strip()
+    user    = await load_user(name)
+    if not user:
+        await update.message.reply_text(f"❌ User <b>{name}</b> not found.", parse_mode=ParseMode.HTML)
+        return
+    emojis = user.get("quality_emojis", {})
+    emojis[quality] = emoji
+    user["quality_emojis"] = emojis
+    await save_user(user)
+    await update.message.reply_text(
+        f"✅ Quality emoji set for <b>{name}</b>:\n<b>{quality}</b> → {emoji}",
+        parse_mode=ParseMode.HTML,
+    )
+
+
+@admin_only
+async def copyuser_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    /copyuser source_name new_name
+    Copy all settings from one user to another.
+    """
+    args = context.args
+    if len(args) < 2:
+        await update.message.reply_text("Usage: /copyuser source_name new_name")
+        return
+    source_name = args[0].lower().strip()
+    new_name    = args[1].lower().strip()
+    source      = await load_user(source_name)
+    if not source:
+        await update.message.reply_text(f"❌ Source user <b>{source_name}</b> not found.", parse_mode=ParseMode.HTML)
+        return
+    existing = await load_user(new_name)
+    if not existing:
+        await update.message.reply_text(f"❌ Target user <b>{new_name}</b> not found. Create it first with /adduser.", parse_mode=ParseMode.HTML)
+        return
+
+    # Copy all settings except identity fields
+    skip = {"_id", "active", "telegram_user_id"}
+    for key, val in source.items():
+        if key not in skip:
+            existing[key] = copy.deepcopy(val)
+
+    await save_user(existing)
+    await update.message.reply_text(
+        f"✅ Copied settings from <b>{source_name}</b> → <b>{new_name}</b>\n\n"
+        f"Now update what's different:\n"
+        f"/setfilestore {new_name} NewBotName\n"
+        f"/setchannel {new_name} -100xxx\n"
+        f"/setheader {new_name} NewName | https://t.me/NewChannel",
+        parse_mode=ParseMode.HTML,
+    )
+
+
+@admin_only
+async def linkuser_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    /linkuser name TELEGRAM_USER_ID
+    Link a Telegram user ID to a user so they can use user commands.
+    """
+    args = context.args
+    if len(args) < 2:
+        await update.message.reply_text("Usage: /linkuser name TELEGRAM_USER_ID")
+        return
+    name = args[0].lower().strip()
+    try:
+        tg_id = int(args[1].strip())
+    except ValueError:
+        await update.message.reply_text("❌ Telegram user ID must be a number.")
+        return
+    user = await load_user(name)
+    if not user:
+        await update.message.reply_text(f"❌ User <b>{name}</b> not found.", parse_mode=ParseMode.HTML)
+        return
+    user["telegram_user_id"] = tg_id
+    await save_user(user)
+    await update.message.reply_text(
+        f"✅ Linked Telegram ID <code>{tg_id}</code> to <b>{name}</b>\n\n"
+        f"They can now use user commands directly without typing their name.",
+        parse_mode=ParseMode.HTML,
+    )
+
+
+# ═══════════════════════════════════════════════════════════
+# COMMANDS — USER COMMANDS (linked by Telegram ID)
+# ═══════════════════════════════════════════════════════════
+
+async def get_user_by_tg_id(tg_id: int) -> dict | None:
+    """Find user account linked to this Telegram user ID."""
+    db = get_db()
+    if db is None:
+        return None
+    return await db["users"].find_one({"telegram_user_id": tg_id})
+
+
+async def myinfo_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    /myinfo — User sees their own linked account info.
+    """
+    tg_id = update.effective_user.id
+    user  = await get_user_by_tg_id(tg_id)
+    if not user:
+        await update.message.reply_text(
+            "❌ Your Telegram ID is not linked to any account.\n\n"
+            "Ask admin to run: /linkuser yourname YOUR_ID"
+        )
+        return
+    name     = user["_id"]
+    channels = ", ".join(user.get("public_channels", [])) or "None"
+    bot      = user.get("filestore_bot", "Not set")
+    active   = "🟢 Active" if user.get("active", True) else "🔴 Inactive"
+    await update.message.reply_text(
+        f"<b>Your Account Info</b>\n\n"
+        f"👤 Name: <b>{name}</b>\n"
+        f"📡 Status: {active}\n"
+        f"🤖 Filestore bot: @{bot}\n"
+        f"📢 Channels: {channels}\n"
+        f"📌 Auto-pin: {'ON' if user.get('pin_posts') else 'OFF'}\n"
+        f"🖼 Poster: {'ON' if user.get('poster_enabled', True) else 'OFF'}\n"
+        f"⭐ Rating: {'ON' if user.get('rating_enabled', True) else 'OFF'}",
+        parse_mode=ParseMode.HTML,
+    )
+
+
+async def recentposts_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    /recentposts — Show last 5 posts for the linked user.
+    """
+    tg_id = update.effective_user.id
+    user  = await get_user_by_tg_id(tg_id)
+    if not user:
+        await update.message.reply_text("❌ Your ID is not linked. Ask admin to run /linkuser.")
+        return
+    name        = user["_id"]
+    user_posted = posted.get(name, {})
+    if not user_posted:
+        await update.message.reply_text("No recent posts found.")
+        return
+    # Sort by most recent
+    items = list(user_posted.items())[-5:]
+    items.reverse()
+    lines = []
+    for mkey, data in items:
+        title   = data.get("title", "?")
+        files_n = len(data.get("files", []))
+        ch      = mkey.split("__")[-1] if "__" in mkey else "?"
+        lines.append(f"🎬 <b>{title}</b> — {files_n} file(s)\n   Channel: <code>{ch}</code>")
+    await update.message.reply_text(
+        f"<b>Recent Posts ({name})</b>\n\n" + "\n\n".join(lines),
+        parse_mode=ParseMode.HTML,
+    )
+
+
+async def preview_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    /preview — Show how caption looks for the linked user.
+    """
+    tg_id = update.effective_user.id
+    user  = await get_user_by_tg_id(tg_id)
+    if not user:
+        await update.message.reply_text("❌ Your ID is not linked. Ask admin to run /linkuser.")
+        return
+    # Build a sample caption
+    sample_data = {
+        "title":         "Sample Movie",
+        "year":          "2025",
+        "quality_label": "WEB-DL",
+        "languages":     ["Tamil", "Telugu"],
+        "is_series":     False,
+        "filename":      "Sample.Movie.2025.WEB-DL.1080p.mkv",
+        "files":         [{"link": "https://t.me/bot?start=fs_sample", "quality": "1080p",
+                           "display_name": "Sample.Movie.2025.WEB-DL.1080p.mkv", "ep": None, "file_id": "fs_sample"}],
+        "tmdb_rating":   "8.5/10",
+    }
+    caption = await build_caption(sample_data, user)
+    await update.message.reply_text(
+        f"<b>Caption Preview for {user['_id']}</b>\n\n{caption}",
+        parse_mode=ParseMode.HTML,
+    )
+
+
+async def repost_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    /repost Title — Repost a movie/series that got corrupted or deleted.
+    """
+    tg_id = update.effective_user.id
+    user  = await get_user_by_tg_id(tg_id)
+    if not user:
+        await update.message.reply_text("❌ Your ID is not linked. Ask admin to run /linkuser.")
+        return
+    if not context.args:
+        await update.message.reply_text("Usage: /repost Movie Title")
+        return
+    title_query = " ".join(context.args).strip().lower()
+    name        = user["_id"]
+    user_posted = posted.get(name, {})
+
+    # Find matching post
+    matched_key  = None
+    matched_data = None
+    for mkey, data in user_posted.items():
+        if title_query in data.get("title", "").lower():
+            matched_key  = mkey
+            matched_data = data
+            break
+
+    if not matched_data:
+        await update.message.reply_text(f"❌ No post found for '<b>{title_query}</b>'\n\nUse /recentposts to see available posts.", parse_mode=ParseMode.HTML)
+        return
+
+    # Re-send to all public channels
+    public_channels = user.get("public_channels", [])
+    caption         = await build_caption(matched_data, user)
+    tmdb_poster     = None
+
+    sent_count = 0
+    for ch in public_channels:
+        try:
+            sent = await send_post(context.bot, ch, tmdb_poster, caption, user)
+            # Update message_id in posted store
+            for mkey2, data2 in posted.get(name, {}).items():
+                if mkey2 == matched_key:
+                    data2["message_id"] = sent.message_id
+            sent_count += 1
+        except Exception as e:
+            log.error("Repost failed ch=%s: %s", ch, e)
+
+    await update.message.reply_text(
+        f"✅ Reposted <b>{matched_data['title']}</b> to {sent_count} channel(s).",
+        parse_mode=ParseMode.HTML,
+    )
+
+
+async def handle_setposter_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    User sends a photo with caption /setposter Movie Title
+    Bot replaces the poster for that movie in public channel.
+    """
+    msg = update.message
+    if not msg or not msg.photo:
+        return
+
+    caption = (msg.caption or "").strip()
+    if not caption.lower().startswith("/setposter"):
+        return
+
+    tg_id = update.effective_user.id
+    user  = await get_user_by_tg_id(tg_id)
+    if not user:
+        await msg.reply_text("❌ Your ID is not linked. Ask admin to run /linkuser.")
+        return
+
+    title_query = re.sub(r"^/setposter\s*", "", caption, flags=re.IGNORECASE).strip().lower()
+    if not title_query:
+        await msg.reply_text("Usage: Send photo with caption /setposter Movie Title")
+        return
+
+    name        = user["_id"]
+    user_posted = posted.get(name, {})
+
+    matched_key  = None
+    matched_data = None
+    for mkey, data in user_posted.items():
+        if title_query in data.get("title", "").lower():
+            matched_key  = mkey
+            matched_data = data
+            break
+
+    if not matched_data:
+        await msg.reply_text(f"❌ No post found for '<b>{title_query}</b>'\n\nUse /recentposts to see available posts.", parse_mode=ParseMode.HTML)
+        return
+
+    # Get the largest photo
+    photo   = msg.photo[-1]
+    file_id = photo.file_id
+
+    public_channels = user.get("public_channels", [])
+    post_caption    = await build_caption(matched_data, user)
+    updated         = 0
+
+    for ch in public_channels:
+        msg_id = matched_data.get("message_id")
+        if not msg_id:
+            continue
+        try:
+            if matched_data.get("has_photo"):
+                # Edit existing photo
+                await context.bot.edit_message_media(
+                    chat_id=ch, message_id=msg_id,
+                    media={"type": "photo", "media": file_id},
+                )
+            else:
+                # Delete text post and send new photo post
+                try:
+                    await context.bot.delete_message(chat_id=ch, message_id=msg_id)
+                except Exception:
+                    pass
+                sent = await context.bot.send_photo(
+                    chat_id=ch, photo=file_id,
+                    caption=post_caption, parse_mode=ParseMode.HTML,
+                )
+                matched_data["message_id"] = sent.message_id
+                matched_data["has_photo"]  = True
+            updated += 1
+        except Exception as e:
+            log.error("Poster update failed ch=%s: %s", ch, e)
+
+    await msg.reply_text(
+        f"✅ Poster updated for <b>{matched_data['title']}</b> in {updated} channel(s).",
+        parse_mode=ParseMode.HTML,
     )
 
 
@@ -1853,6 +2288,8 @@ if __name__ == "__main__":
     app.add_handler(CommandHandler("listusers",      listusers_command))
     app.add_handler(CommandHandler("userinfo",       userinfo_command))
     app.add_handler(CommandHandler("toggleuser",     toggleuser_command))
+    app.add_handler(CommandHandler("copyuser",       copyuser_command))
+    app.add_handler(CommandHandler("linkuser",       linkuser_command))
 
     # User config
     app.add_handler(CommandHandler("setlog",         setlog_command))
@@ -1864,16 +2301,20 @@ if __name__ == "__main__":
     app.add_handler(CommandHandler("setdbchannel",   setdbchannel_command))
     app.add_handler(CommandHandler("settrinitydb",   settrinitydb_command))
     app.add_handler(CommandHandler("setbatchmode",   setbatchmode_command))
-    app.add_handler(CommandHandler("setheader",       setheader_command))
-    app.add_handler(CommandHandler("getheader",       getheader_command))
-    app.add_handler(CommandHandler("removeheader",    removeheader_command))
-    app.add_handler(CommandHandler("setjoin",         setjoin_command))
-    app.add_handler(CommandHandler("getjoin",         getjoin_command))
-    app.add_handler(CommandHandler("removejoin",      removejoin_command))
+    app.add_handler(CommandHandler("setheader",      setheader_command))
+    app.add_handler(CommandHandler("removeheader",   removeheader_command))
+    app.add_handler(CommandHandler("setjoin",        setjoin_command))
+    app.add_handler(CommandHandler("removejoin",     removejoin_command))
     app.add_handler(CommandHandler("setcaption",     setcaption_command))
     app.add_handler(CommandHandler("resetcaption",   resetcaption_command))
+    app.add_handler(CommandHandler("setnote",        setnote_command))
+    app.add_handler(CommandHandler("removenote",     removenote_command))
+    app.add_handler(CommandHandler("pin",            pin_command))
+    app.add_handler(CommandHandler("setposter",      setposter_toggle_command))
+    app.add_handler(CommandHandler("setrating",      setrating_toggle_command))
+    app.add_handler(CommandHandler("setqualityemoji",setqualityemoji_command))
 
-    # Bot control
+    # Bot control (global)
     app.add_handler(CommandHandler("poster",         poster_command))
     app.add_handler(CommandHandler("rating",         rating_command))
     app.add_handler(CommandHandler("pause",          pause_command))
@@ -1882,6 +2323,18 @@ if __name__ == "__main__":
     app.add_handler(CommandHandler("failed",         failed_command))
     app.add_handler(CommandHandler("retry",          retry_command))
     app.add_handler(CommandHandler("notify",         notify_command))
+
+    # User commands (linked by Telegram ID)
+    app.add_handler(CommandHandler("myinfo",         myinfo_command))
+    app.add_handler(CommandHandler("recentposts",    recentposts_command))
+    app.add_handler(CommandHandler("preview",        preview_command))
+    app.add_handler(CommandHandler("repost",         repost_command))
+
+    # Photo handler — user sends photo with /setposter caption
+    app.add_handler(MessageHandler(
+        filters.PHOTO & filters.ChatType.PRIVATE,
+        handle_setposter_photo,
+    ))
 
     # Channel listeners
     app.add_handler(MessageHandler(
