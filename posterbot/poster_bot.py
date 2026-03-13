@@ -114,7 +114,7 @@ DEFAULT_CAPTION = (
     "{rating}"
     "\n<b>🔺Telegram File🔻</b>\n"
     "{files}\n\n"
-    "<b>{batch}</b>\n\n"
+    "{batch}\n\n"
     "<b>Note 💢: If link not working, copy and paste in browser.</b>\n\n"
     "{join}"
 )
@@ -528,7 +528,7 @@ async def build_caption(data: dict, user: dict) -> str:
                 fid = file_id_from_url(f["link"])
                 lnk = f"{worker_url}/?start={fid}" if worker_url else f["link"]
                 q   = f.get("quality") or quality_label or "HD"
-                q_links.append(f'<a href="{lnk}">{q}</a>')
+                q_links.append(f'<a href="{lnk}"><b>{q}</b></a>')
             ep_label = f"EP{ep:02d}" if ep else "EP"
             qualities = " | ".join(q_links)
             file_parts.append(f'🌊 <b>{ep_label} :</b> {qualities}')
@@ -539,7 +539,9 @@ async def build_caption(data: dict, user: dict) -> str:
             label = f.get("display_name") or f.get("quality") or "HD"
             file_parts.append(f'<b>🔥 <a href="{lnk}">{label}</a></b>')
 
-    file_lines = "\n" + "\n\n".join(file_parts) if file_parts else ""
+    # Series: single newline between episodes, movies: double newline
+    sep = "\n" if is_series else "\n\n"
+    file_lines = "\n" + sep.join(file_parts) if file_parts else ""
 
     def make_trinity_batch(file_list: list) -> str:
         """Build Trinity filestore batch link — base64(id1-id2-id3)"""
@@ -566,13 +568,13 @@ async def build_caption(data: dict, user: dict) -> str:
         for q in seen_q:
             blnk = make_trinity_batch(q_files_map[q])
             q_links.append(f'<a href="{blnk}"><b>{q}</b></a>')
-        batch_section = f'📦 Get all files for: {" | ".join(q_links)}'
+        batch_section = f'<b>📦 Get all files for:</b> {" | ".join(q_links)}'
     else:
         if files_sorted:
             batch_link = make_trinity_batch(files_sorted)
         else:
             batch_link = f"https://t.me/{filestore_bot}"
-        batch_section = f'📦 Get all files: <a href="{batch_link}">Click Here</a>'
+        batch_section = f'<b>📦 Get all files:</b> <a href="{batch_link}"><b>Click Here</b></a>'
 
     # Season line
     season_line = ""
