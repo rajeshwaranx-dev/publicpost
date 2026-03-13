@@ -344,7 +344,13 @@ def extract_title_year(text: str) -> tuple[str, int | None]:
 
     title = re.sub(r"[_\-]+", " ", title_raw)
     title = re.sub(r"\.(mkv|mp4|avi)$", "", title, flags=re.IGNORECASE)
-    title = re.sub(r"\s*S\d{1,2}E?\d*\s*", " ", title, flags=re.IGNORECASE)
+
+    # Strip episode number AND anything after it (episode subtitle)
+    # e.g. "Show Name S01E05 Blind Spot" → "Show Name"
+    # e.g. "Show Name EP05 Live Target"  → "Show Name"
+    title = re.sub(r"\s*S\d{1,2}E?\d*.*$", "", title, flags=re.IGNORECASE)
+    title = re.sub(r"\s*EP?\s*\d+.*$", "", title, flags=re.IGNORECASE)
+
     title = re.sub(r"\s+", " ", title).strip()
     return title, year
 
@@ -429,9 +435,14 @@ def extract_button_entry(text: str, reply_markup, meta: dict) -> dict | None:
                 if url and url.startswith("http") and btn_text:
                     label_ascii = "".join(c for c in btn_text if ord(c) < 128).strip()
                     display     = meta.get("filename") or btn_text if GENERIC_RE.match(label_ascii) else btn_text
-                    quality     = quality_from_text(display) or meta.get("quality") or "HD"
-                    fid         = file_id_from_url(url)
-                    entry       = {
+                    # Try to get quality from display name, then filename, then meta
+                    quality = (quality_from_text(display)
+                               or quality_from_text(meta.get("filename", ""))
+                               or meta.get("quality")
+                               or meta.get("quality_label")
+                               or "HD")
+                    fid   = file_id_from_url(url)
+                    entry = {
                         "display_name": display,
                         "quality":      quality,
                         "link":         url,
