@@ -357,7 +357,7 @@ def extract_title_year(text: str) -> tuple[str, int | None]:
 
 def quality_from_text(text: str) -> str:
     m = QUALITY_RE.search(text)
-    return m.group(1) if m else "HD"
+    return m.group(1) if m else ""
 
 
 def parse_log_message(text: str) -> dict | None:
@@ -435,12 +435,25 @@ def extract_button_entry(text: str, reply_markup, meta: dict) -> dict | None:
                 if url and url.startswith("http") and btn_text:
                     label_ascii = "".join(c for c in btn_text if ord(c) < 128).strip()
                     display     = meta.get("filename") or btn_text if GENERIC_RE.match(label_ascii) else btn_text
-                    # Try to get quality from display name, then filename, then meta
-                    quality = (quality_from_text(display)
-                               or quality_from_text(meta.get("filename", ""))
-                               or meta.get("quality")
-                               or meta.get("quality_label")
-                               or "HD")
+
+                    # Resolution: 480p / 720p / 1080p from Quality line in log
+                    resolution = (quality_from_text(display)
+                                  or quality_from_text(meta.get("filename", ""))
+                                  or meta.get("quality", ""))
+
+                    # Source: WEB-DL / HDRip etc from filename
+                    source = meta.get("quality_label", "")
+
+                    # Combine: "720p" or "WEB-DL" or "WEB-DL 720p"
+                    if resolution and source and source.upper() not in ("HD",):
+                        quality = f"{resolution}"   # just resolution for series ep display
+                    elif resolution:
+                        quality = resolution
+                    elif source:
+                        quality = source
+                    else:
+                        quality = "HD"
+
                     fid   = file_id_from_url(url)
                     entry = {
                         "display_name": display,
