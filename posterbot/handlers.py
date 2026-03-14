@@ -22,6 +22,12 @@ async def handle_channel_post(update: Update, context: ContextTypes.DEFAULT_TYPE
     if not msg:
         return
 
+    # Skip messages that already have inline buttons — these are Trinity DB
+    # channel file posts, not log messages. Real log messages arrive plain
+    # first, then get a button added via edit.
+    if msg.reply_markup:
+        return
+
     channel_id = str(msg.chat.id)
     text       = (msg.text or msg.caption or "").strip()
     if not text:
@@ -158,3 +164,4 @@ async def handle_edited_post(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
     log.info("🚀 Posting to %d channel(s) for user=%s", len(public_channels), user_name)
     await asyncio.gather(*[_post_to_channel(ch) for ch in public_channels])
+    
