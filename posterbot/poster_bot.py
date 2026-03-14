@@ -184,6 +184,32 @@ async def find_user_by_log_channel(channel_id: str) -> dict | None:
     return await col.find_one({"log_channels": channel_id, "active": True})
 
 
+async def save_post(user_name: str, mkey: str, data: dict):
+    """Save a single post entry to MongoDB."""
+    col = get_col("posted")
+    if col is None:
+        return
+    doc = {"_id": f"{user_name}::{mkey}", "user": user_name, "mkey": mkey, "data": data}
+    await col.update_one({"_id": doc["_id"]}, {"$set": doc}, upsert=True)
+
+
+async def load_all_posts() -> dict[str, dict]:
+    """Load all posts from MongoDB into memory on startup."""
+    col = get_col("posted")
+    if col is None:
+        return {}
+    result: dict[str, dict] = {}
+    async for doc in col.find({}):
+        user_name = doc["user"]
+        mkey      = doc["mkey"]
+        data      = doc["data"]
+        if user_name not in result:
+            result[user_name] = {}
+        result[user_name][mkey] = data
+    log.info("📦 Loaded %d post entries from MongoDB", sum(len(v) for v in result.values()))
+    return result
+
+
 # ═══════════════════════════════════════════════════════════
 # ADMIN GUARD
 # ═══════════════════════════════════════════════════════════
@@ -549,25 +575,4 @@ async def build_caption(data: dict, user: dict) -> str:
     sep = "\n" if is_series else "\n\n"
     file_lines = "\n" + sep.join(file_parts) if file_parts else ""
 
-    async def make_trinity_batch(file_list: list) -> str:
-        """Build batch link — supports both Trinity batchkey_ and range format."""
-        msg_ids = []
-        for f in file_list:
-            fid = file_id_from_url(f["link"])
-            if fid.startswith("fs_"):
-                try:
-                    b64    = fid[3:]
-                    msg_id = int(base64.urlsafe_b64decode(b64 + "==").decode())
-                    msg_ids.append(msg_id)
-                except Exception:
-                    pass
-
-        if not msg_ids:
-            return f"https://t.me/{filestore_bot}"
-
-        batch_mode      = user.get("batch_mode", "batchkey")   # batchkey | range
-        trinity_mongo   = user.get("trinity_mongo_url", "")
-        trinity_db_name = user.get("trinity_db_name", "Leechx")
-        db_channel_id   = abs(int(user.get("db_channel_id", 0)))
-
-        if batch_mode == "batchkey" and trinity_mongo
+    async def make_
